@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <ares.h>
 #include <list>
 #include <map>
 #include <queue>
@@ -29,10 +30,6 @@ using TableValPtr = IntrusivePtr<TableVal>;
 
 	} // namespace zeek
 
-// Defined in nb_dns.h
-struct nb_dns_info;
-struct nb_dns_result;
-
 namespace zeek::detail
 	{
 
@@ -50,7 +47,7 @@ enum DNS_MgrMode
 	};
 
 // Number of seconds we'll wait for a reply.
-#define DNS_TIMEOUT 5
+constexpr int DNS_TIMEOUT = 5;
 
 class DNS_Mgr final : public iosource::IOSource
 	{
@@ -61,16 +58,27 @@ public:
 	void InitPostScript();
 	void Flush();
 
-	// Looks up the address or addresses of the given host, and returns
-	// a set of addr.
+	/**
+	 * Looks up the address(es) of a given host and returns a set of addr.
+	 * This is a synchronous method and will block until results are ready.
+	 *
+	 * @param host The host name to look up an address for.
+	 * @return A set of addresses.
+	 */
 	TableValPtr LookupHost(const char* host);
 
+	/**
+	 * Looks up the hostname of a given address. This is a synchronous method
+	 * and will block until results are ready.
+	 *
+	 * @param host The addr to lookup a hostname for.
+	 * @return The hostname.
+	 */
 	ValPtr LookupAddr(const IPAddr& addr);
 
 	// Define the directory where to store the data.
-	void SetDir(const char* arg_dir) { dir = util::copy_string(arg_dir); }
+	void SetDir(const char* arg_dir) { dir = arg_dir; }
 
-	void Verify();
 	void Resolve();
 	bool Save();
 
@@ -82,8 +90,7 @@ public:
 	class LookupCallback
 		{
 	public:
-		LookupCallback() { }
-		virtual ~LookupCallback() { }
+		virtual ~LookupCallback() = default;
 
 		virtual void Resolved(const char* name){};
 		virtual void Resolved(TableVal* addrs){};
@@ -107,7 +114,7 @@ public:
 
 	void GetStats(Stats* stats);
 
-	void Terminate();
+	void AddResult(DNS_Mgr_Request* dr, struct hostent* h, uint32_t ttl);
 
 	static TableValPtr empty_addr_set();
 
@@ -121,7 +128,6 @@ protected:
 
 	ValPtr BuildMappingVal(DNS_Mapping* dm);
 
-	void AddResult(DNS_Mgr_Request* dr, struct nb_dns_result* r);
 	void CompareMappings(DNS_Mapping* prev_dm, DNS_Mapping* new_dm);
 	ListValPtr AddrListDelta(ListVal* al1, ListVal* al2);
 	void DumpAddrList(FILE* f, ListVal* al);
@@ -129,14 +135,9 @@ protected:
 	using HostMap = std::map<std::string, std::pair<DNS_Mapping*, DNS_Mapping*>>;
 	using AddrMap = std::map<IPAddr, DNS_Mapping*>;
 	using TextMap = std::map<std::string, DNS_Mapping*>;
-	void LoadCache(FILE* f);
+	void LoadCache(const std::string& path);
 	void Save(FILE* f, const AddrMap& m);
 	void Save(FILE* f, const HostMap& m);
-
-	// Selects on the fd to see if there is an answer available (timeout
-	// is secs). Returns 0 on timeout, -1 on EINTR or other error, and 1
-	// if answer is ready.
-	int AnswerAvailable(int timeout);
 
 	// Issue as many queued async requests as slots are available.
 	void IssueAsyncRequests();
@@ -161,27 +162,27 @@ protected:
 
 	DNS_mgr_request_list requests;
 
-	nb_dns_info* nb_dns;
-	char* cache_name;
-	char* dir; // directory in which cache_name resides
+	std::string cache_name;
+	std::string dir; // directory in which cache_name resides
 
-	bool did_init;
-	int asyncs_pending;
+	bool did_init = false;
+	int asyncs_pending = 0;
 
 	RecordTypePtr dm_rec;
+
+	ares_channel channel;
+	bool ipv6_resolver = false;
 
 	using CallbackList = std::list<LookupCallback*>;
 
 	struct AsyncRequest
 		{
-		double time;
+		double time = 0.0;
 		IPAddr host;
 		std::string name;
 		CallbackList callbacks;
-		bool is_txt;
-		bool processed;
-
-		AsyncRequest() : time(0.0), is_txt(false), processed(false) { }
+		bool is_txt = false;
+		bool processed = false;
 
 		bool IsAddrReq() const { return name.empty(); }
 
