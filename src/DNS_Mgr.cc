@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <algorithm>
 
+#include "zeek/3rdparty/doctest.h"
 #include "zeek/Event.h"
 #include "zeek/Expr.h"
 #include "zeek/Hash.h"
@@ -177,6 +178,219 @@ static TableValPtr empty_addr_set()
 	set_index->Append(std::move(addr_t));
 	auto s = make_intrusive<SetType>(std::move(set_index), nullptr);
 	return make_intrusive<TableVal>(std::move(s));
+	}
+
+TEST_CASE("dns_mapping init null hostent")
+	{
+	DNS_Mapping mapping("www.apple.com", nullptr, 123);
+
+	CHECK(! mapping.Valid());
+	CHECK(mapping.Addrs() == nullptr);
+	// TODO: tableval having a operator== would be really useful
+	//	CHECK(mapping.AddrsSet() == empty_addr_set());
+	CHECK(mapping.Host() == nullptr);
+	}
+
+TEST_CASE("dns_mapping init host")
+	{
+	IPAddr addr("1.2.3.4");
+	in4_addr in4;
+	addr.CopyIPv4(&in4);
+
+	struct hostent he;
+	he.h_name = util::copy_string("testing.home");
+	he.h_aliases = NULL;
+	he.h_addrtype = AF_INET;
+	he.h_length = sizeof(in_addr);
+
+	std::vector<in_addr*> addrs = {&in4, NULL};
+	he.h_addr_list = reinterpret_cast<char**>(addrs.data());
+
+	DNS_Mapping mapping("testing.home", &he, 123);
+	CHECK(mapping.Valid());
+	CHECK(mapping.ReqAddr() == IPAddr::v6_unspecified);
+	CHECK(strcmp(mapping.ReqHost(), "testing.home") == 0);
+	CHECK(mapping.ReqStr() == "testing.home");
+
+	auto lva = mapping.Addrs();
+	CHECK(lva != nullptr);
+	CHECK(lva->Length() == 1);
+	auto lvae = lva->Idx(0)->AsAddrVal();
+	CHECK(lvae != nullptr);
+	CHECK(lvae->Get().AsString() == "1.2.3.4");
+
+	auto tvas = mapping.AddrsSet();
+	CHECK(tvas != nullptr);
+	// TODO: tableval having an operator!= would be really useful
+	//	CHECK(tvas != empty_addr_set());
+
+	auto svh = mapping.Host();
+	CHECK(svh != nullptr);
+	CHECK(svh->ToStdString() == "testing.home");
+	}
+
+TEST_CASE("dns_mapping init addr")
+	{
+	IPAddr addr("1.2.3.4");
+	in4_addr in4;
+	addr.CopyIPv4(&in4);
+
+	struct hostent he;
+	he.h_name = util::copy_string("testing.home");
+	he.h_aliases = NULL;
+	he.h_addrtype = AF_INET;
+	he.h_length = sizeof(in_addr);
+
+	std::vector<in_addr*> addrs = {&in4, NULL};
+	he.h_addr_list = reinterpret_cast<char**>(addrs.data());
+
+	DNS_Mapping mapping(addr, &he, 123);
+	CHECK(mapping.Valid());
+	CHECK(mapping.ReqAddr() == addr);
+	CHECK(mapping.ReqHost() == nullptr);
+	CHECK(mapping.ReqStr() == "1.2.3.4");
+
+	auto lva = mapping.Addrs();
+	CHECK(lva != nullptr);
+	CHECK(lva->Length() == 1);
+	auto lvae = lva->Idx(0)->AsAddrVal();
+	CHECK(lvae != nullptr);
+	CHECK(lvae->Get().AsString() == "1.2.3.4");
+
+	auto tvas = mapping.AddrsSet();
+	CHECK(tvas != nullptr);
+	// TODO: tableval having an operator!= would be really useful
+	//	CHECK(tvas != empty_addr_set());
+
+	auto svh = mapping.Host();
+	CHECK(svh != nullptr);
+	CHECK(svh->ToStdString() == "testing.home");
+	}
+
+TEST_CASE("dns_mapping save reload")
+	{
+	IPAddr addr("1.2.3.4");
+	in4_addr in4;
+	addr.CopyIPv4(&in4);
+
+	struct hostent he;
+	he.h_name = util::copy_string("testing.home");
+	he.h_aliases = NULL;
+	he.h_addrtype = AF_INET;
+	he.h_length = sizeof(in_addr);
+
+	std::vector<in_addr*> addrs = {&in4, NULL};
+	he.h_addr_list = reinterpret_cast<char**>(addrs.data());
+
+	// Create a temporary file in memory and fseek to the end of it so we're at
+	// EOF for the next bit.
+	char buffer[4096];
+	memset(buffer, 0, 4096);
+	FILE* tmpfile = fmemopen(buffer, 4096, "r+");
+	fseek(tmpfile, 0, SEEK_END);
+
+	// Try loading from the file at EOF. This should cause a mapping failure.
+	DNS_Mapping mapping(tmpfile);
+	CHECK(mapping.NoMapping());
+	rewind(tmpfile);
+
+	// Try reading from the empty file. This should cause an init failure.
+	DNS_Mapping mapping2(tmpfile);
+	CHECK(mapping2.InitFailed());
+	rewind(tmpfile);
+
+	// Save a valid mapping into the file and rewind to the start.
+	DNS_Mapping mapping3(addr, &he, 123);
+	mapping3.Save(tmpfile);
+	rewind(tmpfile);
+
+	// Test loading the mapping back out of the file
+	DNS_Mapping mapping4(tmpfile);
+	fclose(tmpfile);
+	CHECK(mapping4.Valid());
+	CHECK(mapping4.ReqAddr() == addr);
+	CHECK(mapping4.ReqHost() == nullptr);
+	CHECK(mapping4.ReqStr() == "1.2.3.4");
+
+	auto lva = mapping4.Addrs();
+	CHECK(lva != nullptr);
+	CHECK(lva->Length() == 1);
+	auto lvae = lva->Idx(0)->AsAddrVal();
+	CHECK(lvae != nullptr);
+	CHECK(lvae->Get().AsString() == "1.2.3.4");
+
+	auto tvas = mapping4.AddrsSet();
+	CHECK(tvas != nullptr);
+	// TODO: tableval having an operator!= would be really useful
+	//	CHECK(tvas != empty_addr_set());
+
+	auto svh = mapping4.Host();
+	CHECK(svh != nullptr);
+	CHECK(svh->ToStdString() == "testing.home");
+	}
+
+TEST_CASE("dns_mapping multiple addresses")
+	{
+	IPAddr addr("1.2.3.4");
+	in4_addr in4_1;
+	addr.CopyIPv4(&in4_1);
+
+	IPAddr addr2("5.6.7.8");
+	in4_addr in4_2;
+	addr2.CopyIPv4(&in4_2);
+
+	struct hostent he;
+	he.h_name = util::copy_string("testing.home");
+	he.h_aliases = NULL;
+	he.h_addrtype = AF_INET;
+	he.h_length = sizeof(in_addr);
+
+	std::vector<in_addr*> addrs = {&in4_1, &in4_2, NULL};
+	he.h_addr_list = reinterpret_cast<char**>(addrs.data());
+
+	DNS_Mapping mapping("testing.home", &he, 123);
+	CHECK(mapping.Valid());
+
+	auto lva = mapping.Addrs();
+	CHECK(lva != nullptr);
+	CHECK(lva->Length() == 2);
+
+	auto lvae = lva->Idx(0)->AsAddrVal();
+	CHECK(lvae != nullptr);
+	CHECK(lvae->Get().AsString() == "1.2.3.4");
+
+	lvae = lva->Idx(1)->AsAddrVal();
+	CHECK(lvae != nullptr);
+	CHECK(lvae->Get().AsString() == "5.6.7.8");
+	}
+
+TEST_CASE("dns_mapping ipv6")
+	{
+	IPAddr addr("64:ff9b:1::");
+	in6_addr in6;
+	addr.CopyIPv6(&in6);
+
+	struct hostent he;
+	he.h_name = util::copy_string("testing.home");
+	he.h_aliases = NULL;
+	he.h_addrtype = AF_INET6;
+	he.h_length = sizeof(in6_addr);
+
+	std::vector<in6_addr*> addrs = {&in6, NULL};
+	he.h_addr_list = reinterpret_cast<char**>(addrs.data());
+
+	DNS_Mapping mapping(addr, &he, 123);
+	CHECK(mapping.Valid());
+	CHECK(mapping.ReqAddr() == addr);
+	CHECK(mapping.ReqHost() == nullptr);
+	CHECK(mapping.ReqStr() == "64:ff9b:1::");
+
+	auto lva = mapping.Addrs();
+	CHECK(lva != nullptr);
+	CHECK(lva->Length() == 1);
+	auto lvae = lva->Idx(0)->AsAddrVal();
+	CHECK(lvae != nullptr);
+	CHECK(lvae->Get().AsString() == "64:ff9b:1::");
 	}
 
 DNS_Mapping::DNS_Mapping(const char* host, struct hostent* h, uint32_t ttl)
