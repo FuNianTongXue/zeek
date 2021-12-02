@@ -29,6 +29,7 @@
 #include <algorithm>
 
 #include "zeek/3rdparty/doctest.h"
+#include "zeek/DNS_Mapping.h"
 #include "zeek/Event.h"
 #include "zeek/Expr.h"
 #include "zeek/Hash.h"
@@ -101,485 +102,6 @@ int DNS_Mgr_Request::MakeRequest(nb_dns_info* nb_dns)
 		return nb_dns_addr_request2(nb_dns, (char*)bytes, len == 1 ? AF_INET : AF_INET6,
 		                            (void*)this, err) >= 0;
 		}
-	}
-
-class DNS_Mapping
-	{
-public:
-	DNS_Mapping(const char* host, struct hostent* h, uint32_t ttl);
-	DNS_Mapping(const IPAddr& addr, struct hostent* h, uint32_t ttl);
-	DNS_Mapping(FILE* f);
-
-	bool NoMapping() const { return no_mapping; }
-	bool InitFailed() const { return init_failed; }
-
-	~DNS_Mapping();
-
-	// Returns nil if this was an address request.
-	const char* ReqHost() const { return req_host; }
-	IPAddr ReqAddr() const { return req_addr; }
-	string ReqStr() const { return req_host ? req_host : req_addr.AsString(); }
-
-	ListValPtr Addrs();
-	TableValPtr AddrsSet(); // addresses returned as a set
-	StringValPtr Host();
-
-	double CreationTime() const { return creation_time; }
-
-	void Save(FILE* f) const;
-
-	bool Failed() const { return failed; }
-	bool Valid() const { return ! failed; }
-
-	bool Expired() const
-		{
-		if ( req_host && num_addrs == 0 )
-			return false; // nothing to expire
-
-		return util::current_time() > (creation_time + req_ttl);
-		}
-
-	int Type() const { return map_type; }
-
-protected:
-	friend class DNS_Mgr;
-
-	void Init(struct hostent* h);
-	void Clear();
-
-	char* req_host;
-	IPAddr req_addr;
-	uint32_t req_ttl;
-
-	int num_names;
-	char** names;
-	StringValPtr host_val;
-
-	int num_addrs;
-	IPAddr* addrs;
-	ListValPtr addrs_val;
-
-	double creation_time;
-	int map_type;
-	bool no_mapping; // when initializing from a file, immediately hit EOF
-	bool init_failed;
-	bool failed;
-	};
-
-void DNS_Mgr_mapping_delete_func(void* v)
-	{
-	delete (DNS_Mapping*)v;
-	}
-
-static TableValPtr empty_addr_set()
-	{
-	auto addr_t = base_type(TYPE_ADDR);
-	auto set_index = make_intrusive<TypeList>(addr_t);
-	set_index->Append(std::move(addr_t));
-	auto s = make_intrusive<SetType>(std::move(set_index), nullptr);
-	return make_intrusive<TableVal>(std::move(s));
-	}
-
-TEST_CASE("dns_mapping init null hostent")
-	{
-	DNS_Mapping mapping("www.apple.com", nullptr, 123);
-
-	CHECK(! mapping.Valid());
-	CHECK(mapping.Addrs() == nullptr);
-	// TODO: tableval having a operator== would be really useful
-	//	CHECK(mapping.AddrsSet() == empty_addr_set());
-	CHECK(mapping.Host() == nullptr);
-	}
-
-TEST_CASE("dns_mapping init host")
-	{
-	IPAddr addr("1.2.3.4");
-	in4_addr in4;
-	addr.CopyIPv4(&in4);
-
-	struct hostent he;
-	he.h_name = util::copy_string("testing.home");
-	he.h_aliases = NULL;
-	he.h_addrtype = AF_INET;
-	he.h_length = sizeof(in_addr);
-
-	std::vector<in_addr*> addrs = {&in4, NULL};
-	he.h_addr_list = reinterpret_cast<char**>(addrs.data());
-
-	DNS_Mapping mapping("testing.home", &he, 123);
-	CHECK(mapping.Valid());
-	CHECK(mapping.ReqAddr() == IPAddr::v6_unspecified);
-	CHECK(strcmp(mapping.ReqHost(), "testing.home") == 0);
-	CHECK(mapping.ReqStr() == "testing.home");
-
-	auto lva = mapping.Addrs();
-	CHECK(lva != nullptr);
-	CHECK(lva->Length() == 1);
-	auto lvae = lva->Idx(0)->AsAddrVal();
-	CHECK(lvae != nullptr);
-	CHECK(lvae->Get().AsString() == "1.2.3.4");
-
-	auto tvas = mapping.AddrsSet();
-	CHECK(tvas != nullptr);
-	// TODO: tableval having an operator!= would be really useful
-	//	CHECK(tvas != empty_addr_set());
-
-	auto svh = mapping.Host();
-	CHECK(svh != nullptr);
-	CHECK(svh->ToStdString() == "testing.home");
-	}
-
-TEST_CASE("dns_mapping init addr")
-	{
-	IPAddr addr("1.2.3.4");
-	in4_addr in4;
-	addr.CopyIPv4(&in4);
-
-	struct hostent he;
-	he.h_name = util::copy_string("testing.home");
-	he.h_aliases = NULL;
-	he.h_addrtype = AF_INET;
-	he.h_length = sizeof(in_addr);
-
-	std::vector<in_addr*> addrs = {&in4, NULL};
-	he.h_addr_list = reinterpret_cast<char**>(addrs.data());
-
-	DNS_Mapping mapping(addr, &he, 123);
-	CHECK(mapping.Valid());
-	CHECK(mapping.ReqAddr() == addr);
-	CHECK(mapping.ReqHost() == nullptr);
-	CHECK(mapping.ReqStr() == "1.2.3.4");
-
-	auto lva = mapping.Addrs();
-	CHECK(lva != nullptr);
-	CHECK(lva->Length() == 1);
-	auto lvae = lva->Idx(0)->AsAddrVal();
-	CHECK(lvae != nullptr);
-	CHECK(lvae->Get().AsString() == "1.2.3.4");
-
-	auto tvas = mapping.AddrsSet();
-	CHECK(tvas != nullptr);
-	// TODO: tableval having an operator!= would be really useful
-	//	CHECK(tvas != empty_addr_set());
-
-	auto svh = mapping.Host();
-	CHECK(svh != nullptr);
-	CHECK(svh->ToStdString() == "testing.home");
-	}
-
-TEST_CASE("dns_mapping save reload")
-	{
-	IPAddr addr("1.2.3.4");
-	in4_addr in4;
-	addr.CopyIPv4(&in4);
-
-	struct hostent he;
-	he.h_name = util::copy_string("testing.home");
-	he.h_aliases = NULL;
-	he.h_addrtype = AF_INET;
-	he.h_length = sizeof(in_addr);
-
-	std::vector<in_addr*> addrs = {&in4, NULL};
-	he.h_addr_list = reinterpret_cast<char**>(addrs.data());
-
-	// Create a temporary file in memory and fseek to the end of it so we're at
-	// EOF for the next bit.
-	char buffer[4096];
-	memset(buffer, 0, 4096);
-	FILE* tmpfile = fmemopen(buffer, 4096, "r+");
-	fseek(tmpfile, 0, SEEK_END);
-
-	// Try loading from the file at EOF. This should cause a mapping failure.
-	DNS_Mapping mapping(tmpfile);
-	CHECK(mapping.NoMapping());
-	rewind(tmpfile);
-
-	// Try reading from the empty file. This should cause an init failure.
-	DNS_Mapping mapping2(tmpfile);
-	CHECK(mapping2.InitFailed());
-	rewind(tmpfile);
-
-	// Save a valid mapping into the file and rewind to the start.
-	DNS_Mapping mapping3(addr, &he, 123);
-	mapping3.Save(tmpfile);
-	rewind(tmpfile);
-
-	// Test loading the mapping back out of the file
-	DNS_Mapping mapping4(tmpfile);
-	fclose(tmpfile);
-	CHECK(mapping4.Valid());
-	CHECK(mapping4.ReqAddr() == addr);
-	CHECK(mapping4.ReqHost() == nullptr);
-	CHECK(mapping4.ReqStr() == "1.2.3.4");
-
-	auto lva = mapping4.Addrs();
-	CHECK(lva != nullptr);
-	CHECK(lva->Length() == 1);
-	auto lvae = lva->Idx(0)->AsAddrVal();
-	CHECK(lvae != nullptr);
-	CHECK(lvae->Get().AsString() == "1.2.3.4");
-
-	auto tvas = mapping4.AddrsSet();
-	CHECK(tvas != nullptr);
-	// TODO: tableval having an operator!= would be really useful
-	//	CHECK(tvas != empty_addr_set());
-
-	auto svh = mapping4.Host();
-	CHECK(svh != nullptr);
-	CHECK(svh->ToStdString() == "testing.home");
-	}
-
-TEST_CASE("dns_mapping multiple addresses")
-	{
-	IPAddr addr("1.2.3.4");
-	in4_addr in4_1;
-	addr.CopyIPv4(&in4_1);
-
-	IPAddr addr2("5.6.7.8");
-	in4_addr in4_2;
-	addr2.CopyIPv4(&in4_2);
-
-	struct hostent he;
-	he.h_name = util::copy_string("testing.home");
-	he.h_aliases = NULL;
-	he.h_addrtype = AF_INET;
-	he.h_length = sizeof(in_addr);
-
-	std::vector<in_addr*> addrs = {&in4_1, &in4_2, NULL};
-	he.h_addr_list = reinterpret_cast<char**>(addrs.data());
-
-	DNS_Mapping mapping("testing.home", &he, 123);
-	CHECK(mapping.Valid());
-
-	auto lva = mapping.Addrs();
-	CHECK(lva != nullptr);
-	CHECK(lva->Length() == 2);
-
-	auto lvae = lva->Idx(0)->AsAddrVal();
-	CHECK(lvae != nullptr);
-	CHECK(lvae->Get().AsString() == "1.2.3.4");
-
-	lvae = lva->Idx(1)->AsAddrVal();
-	CHECK(lvae != nullptr);
-	CHECK(lvae->Get().AsString() == "5.6.7.8");
-	}
-
-TEST_CASE("dns_mapping ipv6")
-	{
-	IPAddr addr("64:ff9b:1::");
-	in6_addr in6;
-	addr.CopyIPv6(&in6);
-
-	struct hostent he;
-	he.h_name = util::copy_string("testing.home");
-	he.h_aliases = NULL;
-	he.h_addrtype = AF_INET6;
-	he.h_length = sizeof(in6_addr);
-
-	std::vector<in6_addr*> addrs = {&in6, NULL};
-	he.h_addr_list = reinterpret_cast<char**>(addrs.data());
-
-	DNS_Mapping mapping(addr, &he, 123);
-	CHECK(mapping.Valid());
-	CHECK(mapping.ReqAddr() == addr);
-	CHECK(mapping.ReqHost() == nullptr);
-	CHECK(mapping.ReqStr() == "64:ff9b:1::");
-
-	auto lva = mapping.Addrs();
-	CHECK(lva != nullptr);
-	CHECK(lva->Length() == 1);
-	auto lvae = lva->Idx(0)->AsAddrVal();
-	CHECK(lvae != nullptr);
-	CHECK(lvae->Get().AsString() == "64:ff9b:1::");
-	}
-
-DNS_Mapping::DNS_Mapping(const char* host, struct hostent* h, uint32_t ttl)
-	{
-	Init(h);
-	req_host = util::copy_string(host);
-	req_ttl = ttl;
-
-	if ( names && ! names[0] )
-		names[0] = util::copy_string(host);
-	}
-
-DNS_Mapping::DNS_Mapping(const IPAddr& addr, struct hostent* h, uint32_t ttl)
-	{
-	Init(h);
-	req_addr = addr;
-	req_host = nullptr;
-	req_ttl = ttl;
-	}
-
-DNS_Mapping::DNS_Mapping(FILE* f)
-	{
-	Clear();
-	init_failed = true;
-
-	req_host = nullptr;
-	req_ttl = 0;
-	creation_time = 0;
-
-	char buf[512];
-
-	if ( ! fgets(buf, sizeof(buf), f) )
-		{
-		no_mapping = true;
-		return;
-		}
-
-	char req_buf[512 + 1], name_buf[512 + 1];
-	int is_req_host;
-	int failed_local;
-
-	if ( sscanf(buf, "%lf %d %512s %d %512s %d %d %" PRIu32, &creation_time, &is_req_host, req_buf,
-	            &failed_local, name_buf, &map_type, &num_addrs, &req_ttl) != 8 )
-		return;
-
-	failed = static_cast<bool>(failed_local);
-
-	if ( is_req_host )
-		req_host = util::copy_string(req_buf);
-	else
-		req_addr = IPAddr(req_buf);
-
-	num_names = 1;
-	names = new char*[num_names];
-	names[0] = util::copy_string(name_buf);
-
-	if ( num_addrs > 0 )
-		{
-		addrs = new IPAddr[num_addrs];
-
-		for ( int i = 0; i < num_addrs; ++i )
-			{
-			if ( ! fgets(buf, sizeof(buf), f) )
-				{
-				num_addrs = i;
-				return;
-				}
-
-			char* newline = strchr(buf, '\n');
-			if ( newline )
-				*newline = '\0';
-
-			addrs[i] = IPAddr(buf);
-			}
-		}
-	else
-		addrs = nullptr;
-
-	init_failed = false;
-	}
-
-DNS_Mapping::~DNS_Mapping()
-	{
-	delete[] req_host;
-
-	if ( names )
-		{
-		for ( int i = 0; i < num_names; ++i )
-			delete[] names[i];
-		delete[] names;
-		}
-
-	delete[] addrs;
-	}
-
-ListValPtr DNS_Mapping::Addrs()
-	{
-	if ( failed )
-		return nullptr;
-
-	if ( ! addrs_val )
-		{
-		addrs_val = make_intrusive<ListVal>(TYPE_ADDR);
-
-		for ( int i = 0; i < num_addrs; ++i )
-			addrs_val->Append(make_intrusive<AddrVal>(addrs[i]));
-		}
-
-	return addrs_val;
-	}
-
-TableValPtr DNS_Mapping::AddrsSet()
-	{
-	auto l = Addrs();
-
-	if ( ! l )
-		return empty_addr_set();
-
-	return l->ToSetVal();
-	}
-
-StringValPtr DNS_Mapping::Host()
-	{
-	if ( failed || num_names == 0 || ! names[0] )
-		return nullptr;
-
-	if ( ! host_val )
-		host_val = make_intrusive<StringVal>(names[0]);
-
-	return host_val;
-	}
-
-void DNS_Mapping::Init(struct hostent* h)
-	{
-	no_mapping = false;
-	init_failed = false;
-	creation_time = util::current_time();
-	host_val = nullptr;
-	addrs_val = nullptr;
-
-	if ( ! h )
-		{
-		Clear();
-		return;
-		}
-
-	map_type = h->h_addrtype;
-	num_names = 1; // for now, just use official name
-	names = new char*[num_names];
-	names[0] = h->h_name ? util::copy_string(h->h_name) : nullptr;
-
-	for ( num_addrs = 0; h->h_addr_list[num_addrs]; ++num_addrs )
-		;
-
-	if ( num_addrs > 0 )
-		{
-		addrs = new IPAddr[num_addrs];
-		for ( int i = 0; i < num_addrs; ++i )
-			if ( h->h_addrtype == AF_INET )
-				addrs[i] = IPAddr(IPv4, (uint32_t*)h->h_addr_list[i], IPAddr::Network);
-			else if ( h->h_addrtype == AF_INET6 )
-				addrs[i] = IPAddr(IPv6, (uint32_t*)h->h_addr_list[i], IPAddr::Network);
-		}
-	else
-		addrs = nullptr;
-
-	failed = false;
-	}
-
-void DNS_Mapping::Clear()
-	{
-	num_names = num_addrs = 0;
-	names = nullptr;
-	addrs = nullptr;
-	host_val = nullptr;
-	addrs_val = nullptr;
-	no_mapping = false;
-	map_type = 0;
-	failed = true;
-	}
-
-void DNS_Mapping::Save(FILE* f) const
-	{
-	fprintf(f, "%.0f %d %s %d %s %d %d %" PRIu32 "\n", creation_time, req_host != nullptr,
-	        req_host ? req_host : req_addr.AsString().c_str(), failed,
-	        (names && names[0]) ? names[0] : "*", map_type, num_addrs, req_ttl);
-
-	for ( int i = 0; i < num_addrs; ++i )
-		fprintf(f, "%s\n", addrs[i].AsString().c_str());
 	}
 
 DNS_Mgr::DNS_Mgr(DNS_MgrMode arg_mode)
@@ -1176,7 +698,7 @@ const char* DNS_Mgr::LookupAddrInCache(const IPAddr& addr)
 
 	// The escapes in the following strings are to avoid having it
 	// interpreted as a trigraph sequence.
-	return d->names ? d->names[0] : "<\?\?\?>";
+	return d->names.empty() ? "<\?\?\?>" : d->names[0].c_str();
 	}
 
 TableValPtr DNS_Mgr::LookupNameInCache(const string& name)
@@ -1191,7 +713,7 @@ TableValPtr DNS_Mgr::LookupNameInCache(const string& name)
 	DNS_Mapping* d4 = it->second.first;
 	DNS_Mapping* d6 = it->second.second;
 
-	if ( ! d4 || ! d4->names || ! d6 || ! d6->names )
+	if ( ! d4 || d4->names.empty() || ! d6 || d6->names.empty() )
 		return nullptr;
 
 	if ( d4->Expired() || d6->Expired() )
@@ -1225,7 +747,7 @@ const char* DNS_Mgr::LookupTextInCache(const string& name)
 
 	// The escapes in the following strings are to avoid having it
 	// interpreted as a trigraph sequence.
-	return d->names ? d->names[0] : "<\?\?\?>";
+	return d->names.empty() ? "<\?\?\?>" : d->names[0].c_str();
 	}
 
 static void resolve_lookup_cb(DNS_Mgr::LookupCallback* callback, TableValPtr result)
@@ -1657,6 +1179,15 @@ void DNS_Mgr::Terminate()
 	{
 	if ( nb_dns )
 		iosource_mgr->UnregisterFd(nb_dns_fd(nb_dns), this);
+	}
+
+TableValPtr DNS_Mgr::empty_addr_set()
+	{
+	auto addr_t = base_type(TYPE_ADDR);
+	auto set_index = make_intrusive<TypeList>(addr_t);
+	set_index->Append(std::move(addr_t));
+	auto s = make_intrusive<SetType>(std::move(set_index), nullptr);
+	return make_intrusive<TableVal>(std::move(s));
 	}
 
 	} // namespace zeek::detail

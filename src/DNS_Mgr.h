@@ -109,6 +109,8 @@ public:
 
 	void Terminate();
 
+	static TableValPtr empty_addr_set();
+
 protected:
 	friend class LookupCallback;
 	friend class DNS_Mgr_Request;
