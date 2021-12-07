@@ -26,7 +26,7 @@ public:
 		          // elasticsearch).
 		};
 
-	JSON(MsgThread* t, TimeFormat tf);
+	JSON(MsgThread* t, TimeFormat tf, bool skip_unset_fields = true);
 	~JSON() override;
 
 	bool Describe(ODesc* desc, Value* val, const std::string& name = "") const override;
@@ -50,6 +50,7 @@ private:
 
 	TimeFormat timestamps;
 	bool surrounding_braces;
+	bool skip_unset_fields;
 	};
 
 	} // namespace zeek::threading::formatter
